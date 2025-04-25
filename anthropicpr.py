@@ -434,6 +434,11 @@ For documents with visual elements (images, charts, tables, slides), also includ
 - VISUAL ELEMENTS: Assessment of how well the visual elements support the document's purpose
 - LAYOUT CONCERNS: Issues with the positioning or formatting of visual elements
 
+When identifying errors, please use the following format when possible:
+- Original: "text with error" should be "corrected text"
+
+This format will help automatically identify and track corrections.
+
 Do not disclose confidential information in your feedback. Focus on improving the quality while maintaining the original meaning.
 """
 
@@ -522,6 +527,11 @@ Provide your feedback in these sections:
 For documents with visual elements (images, charts, tables, slides), also include:
 - VISUAL ELEMENTS: Assessment of how well the visual elements support the document's purpose
 - LAYOUT CONCERNS: Issues with the positioning or formatting of visual elements
+
+When identifying errors, please use the following format when possible:
+- Original: "text with error" should be "corrected text"
+
+This format will help automatically identify and track corrections.
 
 Do not disclose confidential information in your feedback. Focus on improving the quality while maintaining the original meaning.
 """
@@ -670,133 +680,135 @@ Please proofread the following document:
         }
 
 
-def save_pdf(document_name, proofreading_results, document_data=None):
-    """Generate a PDF with proofreading results and document analysis"""
-    try:
-        # Create a temporary directory to store the PDF
-        temp_dir = tempfile.mkdtemp()
-        temp_pdf_path = os.path.join(temp_dir, f"proofread_{document_name}.pdf")
+def generate_error_summary(document_text, ai_results):
+    """Generate a structured error summary from AI proofreading results"""
+    import re
+    import pandas as pd
+    import io
+    
+    all_errors = []
+    
+    # Process each AI model's feedback
+    for model, result in ai_results.items():
+        content = result["content"]
         
-        # Create PDF
-        pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=15)
+        # Attempt to extract the errors section
+        grammar_section = re.search(r'GRAMMAR & SPELLING:(.*?)(?:FORMATTING:|SUGGESTIONS:|REVISED TEXT:|VISUAL ELEMENTS:|$)', 
+                                   content, re.DOTALL | re.IGNORECASE)
+        consistency_section = re.search(r'CONSISTENCY CONCERNS:(.*?)(?:GRAMMAR & SPELLING:|FORMATTING:|SUGGESTIONS:|REVISED TEXT:|VISUAL ELEMENTS:|$)', 
+                                      content, re.DOTALL | re.IGNORECASE)
+        formatting_section = re.search(r'FORMATTING:(.*?)(?:SUGGESTIONS:|REVISED TEXT:|VISUAL ELEMENTS:|$)', 
+                                     content, re.DOTALL | re.IGNORECASE)
         
-        # Add first page and set font
-        pdf.add_page()
-        pdf.set_font('Arial', 'B', 14)
-            
-        # Create a safe title
-        safe_name = ''.join(c if ord(c) < 128 else '?' for c in document_name)
-        pdf.cell(200, 10, f"Proofread Document: {safe_name}", ln=True, align="C")
+        # Get the revised text if available
+        revised_text_match = re.search(r'REVISED TEXT:(.*?)(?:VISUAL ELEMENTS:|$)', content, re.DOTALL | re.IGNORECASE)
+        revised_text = revised_text_match.group(1).strip() if revised_text_match else None
         
-        # Add document summary if available
-        if document_data:
-            pdf.set_font('Arial', 'B', 12)
-            pdf.cell(200, 10, "Document Analysis", ln=True)
-            pdf.set_font('Arial', '', 10)
-            
-            # List detected elements
-            num_images = len(document_data.get('images', []))
-            num_tables = len(document_data.get('tables', []))
-            num_slides = len(document_data.get('slides', []))
-            num_charts = len(document_data.get('charts', []))
-            
-            pdf.cell(200, 6, f"Images detected: {num_images}", ln=True)
-            pdf.cell(200, 6, f"Tables detected: {num_tables}", ln=True)
-            pdf.cell(200, 6, f"Slides detected: {num_slides}", ln=True)
-            pdf.cell(200, 6, f"Charts detected: {num_charts}", ln=True)
-            pdf.ln()
-            
-            # Add some sample images if available (thumbnail size)
-            if num_images > 0:
-                pdf.set_font('Arial', 'B', 12)
-                pdf.cell(200, 10, "Sample Images (thumbnails)", ln=True)
+        # Process each type of error
+        sections = [
+            ("Grammar/Spelling", grammar_section.group(1).strip() if grammar_section else None),
+            ("Consistency", consistency_section.group(1).strip() if consistency_section else None),
+            ("Formatting", formatting_section.group(1).strip() if formatting_section else None)
+        ]
+        
+        for error_type, section_text in sections:
+            if not section_text:
+                continue
                 
-                try:
-                    # Show up to 2 images as thumbnails
-                    for i, img_data in enumerate(document_data.get('images', [])[:2]):
-                        if 'data' in img_data and img_data['data']:
-                            # Create a temporary image file
-                            img_temp = os.path.join(temp_dir, f"img_{i}.png")
-                            try:
-                                img = Image.open(BytesIO(img_data['data']))
-                                # Resize to thumbnail
-                                img.thumbnail((100, 100))
-                                img.save(img_temp, format="PNG")
-                                
-                                # Add to PDF
-                                pdf.image(img_temp, x=pdf.get_x(), y=pdf.get_y(), w=50)
-                                pdf.ln(60)  # Space for the image
-                            except Exception as img_e:
-                                pdf.cell(200, 10, f"[Image {i+1} preview unavailable]", ln=True)
-                except Exception as e:
-                    pdf.cell(200, 10, f"Error displaying images: {str(e)}", ln=True)
+            # Try to extract individual errors - this is a bit heuristic
+            # Look for bullet points, numbered lists, or just newlines
+            error_items = re.findall(r'[-•*]\s+(.*?)(?=[-•*]|\n\n|$)', section_text, re.DOTALL)
+            if not error_items:
+                error_items = re.findall(r'\d+\.\s+(.*?)(?=\d+\.|\n\n|$)', section_text, re.DOTALL)
+            if not error_items:
+                error_items = section_text.split('\n')
+                
+            for error_item in error_items:
+                error_item = error_item.strip()
+                if not error_item:
+                    continue
+                    
+                # Try to find the original text and corrected version
+                # Look for patterns like "X should be Y" or "Change X to Y"
+                correction_match = re.search(r'"([^"]+)"\s+(?:should be|change to|replace with|correct to)\s+"([^"]+)"', 
+                                           error_item, re.IGNORECASE)
+                
+                # Also look for "Original: X should be Y" format
+                if not correction_match:
+                    correction_match = re.search(r'Original:\s*"([^"]+)"\s+(?:should be|change to|replace with|correct to)\s+"([^"]+)"', 
+                                               error_item, re.IGNORECASE)
+                
+                if correction_match:
+                    original = correction_match.group(1).strip()
+                    corrected = correction_match.group(2).strip()
+                    
+                    # Find location in document
+                    location = "Unknown"
+                    try:
+                        # If original text is found in document, get position
+                        if original in document_text:
+                            pos = document_text.find(original)
+                            # Get surrounding context to help locate
+                            start = max(0, pos - 20)
+                            end = min(len(document_text), pos + len(original) + 20)
+                            context = document_text[start:end]
+                            
+                            # Count line number
+                            line_num = document_text[:pos].count('\n') + 1
+                            location = f"Line {line_num} (approx.): ...{context}..."
+                    except:
+                        pass
+                    
+                    all_errors.append({
+                        "Model": model,
+                        "Error Type": error_type,
+                        "Original Text": original,
+                        "Corrected Text": corrected,
+                        "Location": location,
+                        "Description": error_item
+                    })
+                else:
+                    # If we can't parse the correction clearly, just include the full error description
+                    all_errors.append({
+                        "Model": model,
+                        "Error Type": error_type,
+                        "Original Text": "",
+                        "Corrected Text": "",
+                        "Location": "N/A",
+                        "Description": error_item
+                    })
+    
+    # Create a DataFrame from all errors
+    df = pd.DataFrame(all_errors)
+    
+    # Generate CSV and text summaries
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_text = csv_buffer.getvalue()
+    
+
+    # More human-readable text format
+    text_summary = "ERROR SUMMARY REPORT\n\n"
+    text_summary += f"Total Errors Found: {len(all_errors)}\n\n"
+    
+    for model in set(df["Model"]):
+        model_errors = df[df["Model"] == model]
+        text_summary += f"===== {model} =====\n"
+        text_summary += f"Found {len(model_errors)} errors\n\n"
         
-        # Process each model's output
-        for model, output_data in proofreading_results.items():
-            # Set header font for model name
-            pdf.set_font('Arial', 'B', 12)
-            
-            # Create safe model name
-            safe_model = ''.join(c if ord(c) < 128 else '?' for c in model)
-            pdf.cell(200, 10, f"Model: {safe_model}", ln=True)
-            
-            # Set body font for content
-            pdf.set_font('Arial', '', 10)
-            
-            # Process text line by line
-            for line in output_data["content"].split("\n"):
-                # Replace problematic characters
-                safe_line = ''.join(c if ord(c) < 128 else '?' for c in line)
-                pdf.multi_cell(0, 5, safe_line)
-            pdf.ln()
-
-        # Output to temporary file
-        pdf.output(temp_pdf_path)
-        
-        # Read the file into memory
-        with open(temp_pdf_path, 'rb') as f:
-            pdf_bytes = f.read()
-            
-        # Clean up the temporary directory
-        try:
-            for filename in os.listdir(temp_dir):
-                os.remove(os.path.join(temp_dir, filename))
-            os.rmdir(temp_dir)
-        except:
-            pass
-            
-        return pdf_bytes
-        
-    except Exception as e:
-        st.warning(f"PDF generation failed: {e}. Using text format instead.")
-        return None
-
-
-def main():
-    st.set_page_config(page_title="Private Equity Deal Proofreader", layout="wide")
-    st.title("🔍 Private Equity Deal Proofreader")
-
-    # Instructions Expander
-    with st.expander("💡 Instructions"):
-        st.markdown("""
-This tool proofreads private equity deal documents to ensure they are clear, accurate, and professional before sharing with investors, legal counsel, and potential buyers.
-
-**What this tool does:**
-1. Checks for grammar, spelling, and punctuation errors
-2. Ensures consistency in financial terminology (EBITDA, enterprise value, etc.)
-3. Verifies document formatting and style
-4. Maintains professional tone and clarity
-5. Identifies ambiguities or confusing phrasing
-6. Reviews deal-specific terminology and dates
-7. Flags potential compliance issues
-8. **NEW: Analyzes visual elements** including graphs, charts, and slides
-9. **NEW: Extracts text from images** using OCR technology
-10. **NEW: Checks consistency across presentations** including slide formatting and layout
-
-**How to use it:**
-1. Upload your API Key and Document(s)
-2. Select document type and AI model
-3. Set any style guide requirements (optional)
-4. Click "Proofread Documents" to begin
-5. Download results in TXT or PDF format
+        for idx, error in model_errors.iterrows():
+            text_summary += f"ERROR #{idx+1}: {error['Error Type']}\n"
+            text_summary += f"Description: {error['Description']}\n"
+            if error['Original Text']:
+                text_summary += f"Original: \"{error['Original Text']}\"\n"
+            if error['Corrected Text']:
+                text_summary += f"Corrected: \"{error['Corrected Text']}\"\n"
+            if error['Location'] != "N/A":
+                text_summary += f"Location: {error['Location']}\n"
+            text_summary += "\n"
+    
+    return {
+        "csv": csv_text.encode('utf-8'),
+        "text": text_summary.encode('utf-8'),
+        "dataframe": df
+    }
